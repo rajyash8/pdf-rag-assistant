@@ -1,10 +1,9 @@
 streamlit
-python-dotenv
 langchain
 langchain-community
-langchain-openai
+langchain-core
+langchain-text-splitters
 langchain-mistralai
 langchain-chroma
-langchain-text-splitters
-chromadb
+chromadb==1.5.9
 pypdf
