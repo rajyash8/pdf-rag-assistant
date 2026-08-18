@@ -1,18 +1,15 @@
-from langchain_mistralai import MistralAIEmbeddings
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_mistralai import MistralAIEmbeddings
 from langchain_chroma import Chroma
 
 
 def create_database(pdf_path):
-
-    # 1. Load PDF
+    # Load PDF
     loader = PyPDFLoader(pdf_path)
     documents = loader.load()
 
-    print(f"Loaded {len(documents)} pages")
-
-    # 2. Split into chunks
+    # Split PDF into chunks
     text_splitter = RecursiveCharacterTextSplitter(
         chunk_size=1000,
         chunk_overlap=200
@@ -20,21 +17,18 @@ def create_database(pdf_path):
 
     chunks = text_splitter.split_documents(documents)
 
-    print(f"Created {len(chunks)} chunks")
-
-    # 3. Mistral Embeddings
-    embedding_model = MistralAIEmbeddings(
+    # Mistral embeddings
+    embeddings = MistralAIEmbeddings(
         model="mistral-embed"
     )
 
-    # 4. Create Chroma database
+    # IMPORTANT:
+    # No persist_directory.
+    # Chroma runs in memory on Streamlit Cloud.
     vectorstore = Chroma.from_documents(
         documents=chunks,
-        embedding=embedding_model,
-        persist_directory="chroma_db",
+        embedding=embeddings,
         collection_name="pdf_documents"
     )
-
-    print("Chroma database created successfully!")
 
     return vectorstore
