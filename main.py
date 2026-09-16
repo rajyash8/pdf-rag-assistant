@@ -1,5 +1,6 @@
 import os
 import tempfile
+import hashlib
 
 import streamlit as st
 
@@ -9,6 +10,10 @@ from langchain_core.prompts import ChatPromptTemplate
 from createdatabase import create_database
 
 
+# ============================================================
+# PAGE CONFIG
+# ============================================================
+
 st.set_page_config(
     page_title="PDF RAG Assistant",
     page_icon="📚",
@@ -16,9 +21,9 @@ st.set_page_config(
 )
 
 
-# -----------------------------
-# Mistral API Key
-# -----------------------------
+# ============================================================
+# MISTRAL API KEY
+# ============================================================
 
 if "MISTRAL_API_KEY" not in st.secrets:
     st.error("MISTRAL_API_KEY is not configured in Streamlit Secrets.")
@@ -27,9 +32,9 @@ if "MISTRAL_API_KEY" not in st.secrets:
 os.environ["MISTRAL_API_KEY"] = st.secrets["MISTRAL_API_KEY"]
 
 
-# -----------------------------
-# Page UI
-# -----------------------------
+# ============================================================
+# PAGE UI
+# ============================================================
 
 st.title("📚 PDF RAG Assistant")
 
@@ -38,9 +43,9 @@ st.write(
 )
 
 
-# -----------------------------
-# File Upload
-# -----------------------------
+# ============================================================
+# FILE UPLOAD
+# ============================================================
 
 uploaded_file = st.file_uploader(
     "Upload your PDF",
@@ -48,25 +53,31 @@ uploaded_file = st.file_uploader(
 )
 
 
-# -----------------------------
-# Session State
-# -----------------------------
+# ============================================================
+# SESSION STATE
+# ============================================================
 
 if "vectorstore" not in st.session_state:
     st.session_state.vectorstore = None
 
-if "pdf_name" not in st.session_state:
-    st.session_state.pdf_name = None
+if "pdf_hash" not in st.session_state:
+    st.session_state.pdf_hash = None
 
 
-# -----------------------------
-# Process PDF
-# -----------------------------
+# ============================================================
+# PROCESS PDF
+# ============================================================
 
 if uploaded_file is not None:
 
-    # Only create database when a NEW PDF is uploaded
-    if st.session_state.pdf_name != uploaded_file.name:
+    # Read uploaded PDF
+    pdf_bytes = uploaded_file.getvalue()
+
+    # Generate unique hash for PDF
+    current_pdf_hash = hashlib.md5(pdf_bytes).hexdigest()
+
+    # Only process if this is a different PDF
+    if st.session_state.pdf_hash != current_pdf_hash:
 
         with st.spinner("Processing PDF..."):
 
@@ -74,49 +85,63 @@ if uploaded_file is not None:
 
             try:
 
-                # Create temporary PDF file
+                # ---------------------------------------------
+                # Create temporary PDF
+                # ---------------------------------------------
+
                 with tempfile.NamedTemporaryFile(
                     delete=False,
                     suffix=".pdf"
                 ) as temp_file:
 
-                    temp_file.write(uploaded_file.getbuffer())
+                    temp_file.write(pdf_bytes)
                     temp_path = temp_file.name
 
-                # Create in-memory Chroma database
+                # ---------------------------------------------
+                # Create vector database
+                # ---------------------------------------------
+
                 vectorstore = create_database(temp_path)
 
-                # Save vectorstore in Streamlit session
-                st.session_state.vectorstore = vectorstore
-                st.session_state.pdf_name = uploaded_file.name
+                # ---------------------------------------------
+                # Save in session
+                # ---------------------------------------------
 
-                st.success("PDF processed successfully!")
+                st.session_state.vectorstore = vectorstore
+                st.session_state.pdf_hash = current_pdf_hash
+
+                st.success(
+                    f"✅ {uploaded_file.name} processed successfully!"
+                )
 
             except Exception as e:
 
                 st.error(
-                    f"Error while processing PDF: {str(e)}"
+                    f"❌ Error while processing PDF: {str(e)}"
                 )
 
                 st.session_state.vectorstore = None
-                st.session_state.pdf_name = None
+                st.session_state.pdf_hash = None
 
             finally:
 
-                # Remove temporary PDF
+                # ---------------------------------------------
+                # Delete temporary file
+                # ---------------------------------------------
+
                 if temp_path and os.path.exists(temp_path):
                     os.remove(temp_path)
 
 
-# -----------------------------
-# Ask Questions
-# -----------------------------
+# ============================================================
+# ASK QUESTIONS
+# ============================================================
 
 if st.session_state.vectorstore is not None:
 
     st.divider()
 
-    st.subheader("Ask a question")
+    st.subheader("💬 Ask a question")
 
     question = st.text_input(
         "Enter your question:",
@@ -129,7 +154,10 @@ if st.session_state.vectorstore is not None:
 
             try:
 
-                # MMR retrieval
+                # =================================================
+                # RETRIEVER
+                # =================================================
+
                 retriever = st.session_state.vectorstore.as_retriever(
                     search_type="mmr",
                     search_kwargs={
@@ -139,22 +167,35 @@ if st.session_state.vectorstore is not None:
                     }
                 )
 
-                # Retrieve relevant chunks
+                # =================================================
+                # RETRIEVE DOCUMENTS
+                # =================================================
+
                 documents = retriever.invoke(question)
 
-                # Combine retrieved context
+                # =================================================
+                # BUILD CONTEXT
+                # =================================================
+
                 context = "\n\n".join(
                     document.page_content
                     for document in documents
                 )
 
-                # Mistral chat model
+                # =================================================
+                # MISTRAL LLM
+                # =================================================
+
                 llm = ChatMistralAI(
                     model="mistral-small-latest",
-                    temperature=0
+                    temperature=0,
+                    api_key=os.environ["MISTRAL_API_KEY"]
                 )
 
-                # Prompt
+                # =================================================
+                # PROMPT
+                # =================================================
+
                 prompt = ChatPromptTemplate.from_template(
                     """
 You are a helpful PDF question-answering assistant.
@@ -163,9 +204,13 @@ Answer the user's question using ONLY the information
 provided in the context below.
 
 If the answer cannot be found in the context, say:
+
 "I couldn't find that information in the PDF."
 
-Do not make up information.
+Rules:
+- Do not use outside knowledge.
+- Do not make up information.
+- Keep the answer clear and concise.
 
 Context:
 {context}
@@ -177,10 +222,16 @@ Answer:
 """
                 )
 
-                # Create chain
+                # =================================================
+                # CHAIN
+                # =================================================
+
                 chain = prompt | llm
 
-                # Generate answer
+                # =================================================
+                # GENERATE ANSWER
+                # =================================================
+
                 response = chain.invoke(
                     {
                         "context": context,
@@ -188,11 +239,18 @@ Answer:
                     }
                 )
 
+                # =================================================
+                # DISPLAY ANSWER
+                # =================================================
+
                 st.subheader("Answer")
 
                 st.write(response.content)
 
-                # Optional source information
+                # =================================================
+                # SOURCES
+                # =================================================
+
                 with st.expander("📄 View Sources"):
 
                     for i, document in enumerate(
@@ -200,12 +258,18 @@ Answer:
                         start=1
                     ):
 
-                        page_number = (
-                            document.metadata.get("page", "Unknown")
+                        page_number = document.metadata.get(
+                            "page",
+                            "Unknown"
                         )
 
+                        if isinstance(page_number, int):
+                            page_display = page_number + 1
+                        else:
+                            page_display = page_number
+
                         st.markdown(
-                            f"**Source {i} — Page {page_number + 1 if isinstance(page_number, int) else page_number}**"
+                            f"**Source {i} — Page {page_display}**"
                         )
 
                         st.write(
@@ -217,5 +281,5 @@ Answer:
             except Exception as e:
 
                 st.error(
-                    f"Error while answering question: {str(e)}"
+                    f"❌ Error while answering question: {str(e)}"
                 )
