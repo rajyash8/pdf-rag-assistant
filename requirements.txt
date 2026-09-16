@@ -5,5 +5,7 @@ langchain-core
 langchain-text-splitters
 langchain-mistralai
 langchain-chroma
-chromadb==1.5.9
+langchain-huggingface
+sentence-transformers
 pypdf
+chromadb
