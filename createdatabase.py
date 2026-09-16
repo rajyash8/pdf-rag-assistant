@@ -1,22 +1,22 @@
-import os
-
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_mistralai import MistralAIEmbeddings
+from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_chroma import Chroma
 
 
 def create_database(pdf_path):
 
     # -----------------------------
-    # Load PDF
+    # 1. Load PDF
     # -----------------------------
+
     loader = PyPDFLoader(pdf_path)
     documents = loader.load()
 
     # -----------------------------
-    # Split PDF into chunks
+    # 2. Split PDF into chunks
     # -----------------------------
+
     text_splitter = RecursiveCharacterTextSplitter(
         chunk_size=1000,
         chunk_overlap=200
@@ -24,17 +24,21 @@ def create_database(pdf_path):
 
     chunks = text_splitter.split_documents(documents)
 
+    print(f"Loaded pages: {len(documents)}")
+    print(f"Created chunks: {len(chunks)}")
+
     # -----------------------------
-    # Mistral Embeddings
+    # 3. Local HuggingFace embeddings
     # -----------------------------
-    embeddings = MistralAIEmbeddings(
-        model="mistral-embed",
-        api_key=os.environ["MISTRAL_API_KEY"]
+
+    embeddings = HuggingFaceEmbeddings(
+        model_name="sentence-transformers/all-MiniLM-L6-v2"
     )
 
     # -----------------------------
-    # Create Chroma database
+    # 4. Chroma vector database
     # -----------------------------
+
     vectorstore = Chroma.from_documents(
         documents=chunks,
         embedding=embeddings,
