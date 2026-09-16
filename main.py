@@ -1,18 +1,21 @@
-import os
 import hashlib
 import tempfile
+import os
 
 import streamlit as st
 
-from langchain_mistralai import ChatMistralAI
-from langchain_core.prompts import ChatPromptTemplate
+from langchain_community.document_loaders import PyPDFLoader
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_chroma import Chroma
 
-from createdatabase import create_database
+from langchain_huggingface import HuggingFacePipeline
+from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
 
 
-# =====================================================
+# =========================================================
 # STREAMLIT CONFIG
-# =====================================================
+# =========================================================
 
 st.set_page_config(
     page_title="PDF RAG Assistant",
@@ -21,55 +24,9 @@ st.set_page_config(
 )
 
 
-# =====================================================
-# MISTRAL API KEY
-# =====================================================
-
-if "MISTRAL_API_KEY" not in st.secrets:
-
-    st.error(
-        "MISTRAL_API_KEY is not configured in Streamlit Secrets."
-    )
-
-    st.stop()
-
-
-MISTRAL_API_KEY = st.secrets["MISTRAL_API_KEY"]
-
-
-# =====================================================
-# MISTRAL LLM
-# =====================================================
-
-@st.cache_resource
-def get_llm():
-
-    return ChatMistralAI(
-        model="mistral-small-latest",
-        temperature=0,
-        api_key=MISTRAL_API_KEY
-    )
-
-
-# =====================================================
-# SESSION STATE
-# =====================================================
-
-if "vectorstore" not in st.session_state:
-    st.session_state.vectorstore = None
-
-
-if "pdf_hash" not in st.session_state:
-    st.session_state.pdf_hash = None
-
-
-if "pdf_name" not in st.session_state:
-    st.session_state.pdf_name = None
-
-
-# =====================================================
-# TITLE
-# =====================================================
+# =========================================================
+# PAGE TITLE
+# =========================================================
 
 st.title("📚 PDF RAG Assistant")
 
@@ -78,9 +35,75 @@ st.write(
 )
 
 
-# =====================================================
+# =========================================================
+# LOCAL EMBEDDING MODEL
+# =========================================================
+
+@st.cache_resource
+def get_embeddings():
+
+    embeddings = HuggingFaceEmbeddings(
+        model_name="sentence-transformers/all-MiniLM-L6-v2"
+    )
+
+    return embeddings
+
+
+# =========================================================
+# LOCAL LLM - TINYLLAMA
+# =========================================================
+
+@st.cache_resource
+def get_llm():
+
+    model_id = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_id
+    )
+
+    model = AutoModelForCausalLM.from_pretrained(
+        model_id
+    )
+
+    pipe = pipeline(
+        "text-generation",
+        model=model,
+        tokenizer=tokenizer,
+        max_new_tokens=256,
+        do_sample=False,
+        repetition_penalty=1.05
+    )
+
+    llm = HuggingFacePipeline(
+        pipeline=pipe
+    )
+
+    return llm
+
+
+# =========================================================
+# SESSION STATE
+# =========================================================
+
+if "vectorstore" not in st.session_state:
+
+    st.session_state.vectorstore = None
+
+
+if "pdf_hash" not in st.session_state:
+
+    st.session_state.pdf_hash = None
+
+
+if "pdf_name" not in st.session_state:
+
+    st.session_state.pdf_name = None
+
+
+# =========================================================
 # PDF UPLOAD
-# =====================================================
+# =========================================================
 
 uploaded_file = st.file_uploader(
     "Upload your PDF",
@@ -88,55 +111,92 @@ uploaded_file = st.file_uploader(
 )
 
 
-# =====================================================
+# =========================================================
 # PROCESS PDF
-# =====================================================
+# =========================================================
 
 if uploaded_file is not None:
 
     pdf_bytes = uploaded_file.getvalue()
 
-    # Create unique hash for the uploaded PDF
-    current_hash = hashlib.md5(pdf_bytes).hexdigest()
+    current_hash = hashlib.md5(
+        pdf_bytes
+    ).hexdigest()
 
 
-    # Only process when a new PDF is uploaded
+    # Only process a new PDF
     if st.session_state.pdf_hash != current_hash:
 
         with st.spinner(
-            "Processing PDF... This may take a moment."
+            "Processing PDF... Please wait."
         ):
 
             temp_path = None
 
             try:
 
-                # -----------------------------
-                # Create temporary PDF
-                # -----------------------------
+                # -----------------------------------------
+                # Save PDF temporarily
+                # -----------------------------------------
 
                 with tempfile.NamedTemporaryFile(
                     delete=False,
                     suffix=".pdf"
                 ) as temp_file:
 
-                    temp_file.write(pdf_bytes)
+                    temp_file.write(
+                        pdf_bytes
+                    )
 
                     temp_path = temp_file.name
 
 
-                # -----------------------------
-                # Create vector database
-                # -----------------------------
+                # -----------------------------------------
+                # Load PDF
+                # -----------------------------------------
 
-                vectorstore = create_database(
+                loader = PyPDFLoader(
                     temp_path
                 )
 
+                documents = loader.load()
 
-                # -----------------------------
+
+                # -----------------------------------------
+                # Split PDF
+                # -----------------------------------------
+
+                text_splitter = RecursiveCharacterTextSplitter(
+                    chunk_size=1000,
+                    chunk_overlap=200
+                )
+
+                chunks = text_splitter.split_documents(
+                    documents
+                )
+
+
+                # -----------------------------------------
+                # Local embeddings
+                # -----------------------------------------
+
+                embeddings = get_embeddings()
+
+
+                # -----------------------------------------
+                # Create Chroma database
+                # -----------------------------------------
+
+                vectorstore = Chroma.from_documents(
+                    documents=chunks,
+                    embedding=embeddings,
+                    collection_name="pdf_documents"
+                )
+
+
+                # -----------------------------------------
                 # Save in session
-                # -----------------------------
+                # -----------------------------------------
 
                 st.session_state.vectorstore = vectorstore
 
@@ -149,11 +209,16 @@ if uploaded_file is not None:
                     f"✅ {uploaded_file.name} processed successfully!"
                 )
 
+                st.info(
+                    f"📄 Pages: {len(documents)} | "
+                    f"Chunks: {len(chunks)}"
+                )
+
 
             except Exception as e:
 
                 st.error(
-                    f"❌ Error while processing PDF: {str(e)}"
+                    f"❌ Error while processing PDF:\n\n{str(e)}"
                 )
 
                 st.session_state.vectorstore = None
@@ -165,21 +230,17 @@ if uploaded_file is not None:
 
             finally:
 
-                # -----------------------------
-                # Delete temporary PDF
-                # -----------------------------
-
                 if (
-                    temp_path
+                    temp_path is not None
                     and os.path.exists(temp_path)
                 ):
 
                     os.remove(temp_path)
 
 
-# =====================================================
-# ASK QUESTION
-# =====================================================
+# =========================================================
+# QUESTION SECTION
+# =========================================================
 
 if st.session_state.vectorstore is not None:
 
@@ -188,9 +249,9 @@ if st.session_state.vectorstore is not None:
     st.subheader("💬 Ask a question")
 
 
-    # =================================================
-    # FORM
-    # =================================================
+    # =====================================================
+    # QUESTION FORM
+    # =====================================================
 
     with st.form("question_form"):
 
@@ -199,27 +260,26 @@ if st.session_state.vectorstore is not None:
             placeholder="What is this PDF about?"
         )
 
-
         submitted = st.form_submit_button(
             "Ask"
         )
 
 
-    # =================================================
-    # RUN RAG
-    # =================================================
+    # =====================================================
+    # ANSWER
+    # =====================================================
 
     if submitted and question.strip():
 
         with st.spinner(
-            "Searching the PDF..."
+            "Searching the PDF and generating answer..."
         ):
 
             try:
 
-                # -------------------------------------
-                # 1. Create retriever
-                # -------------------------------------
+                # -----------------------------------------
+                # Retriever
+                # -----------------------------------------
 
                 retriever = (
                     st.session_state.vectorstore
@@ -234,18 +294,18 @@ if st.session_state.vectorstore is not None:
                 )
 
 
-                # -------------------------------------
-                # 2. Search PDF
-                # -------------------------------------
+                # -----------------------------------------
+                # Retrieve relevant documents
+                # -----------------------------------------
 
                 documents = retriever.invoke(
                     question
                 )
 
 
-                # -------------------------------------
-                # 3. Build context
-                # -------------------------------------
+                # -----------------------------------------
+                # Build context
+                # -----------------------------------------
 
                 context = "\n\n".join(
                     document.page_content
@@ -253,34 +313,29 @@ if st.session_state.vectorstore is not None:
                 )
 
 
-                # -------------------------------------
-                # 4. Get Mistral
-                # -------------------------------------
+                # -----------------------------------------
+                # Local TinyLlama
+                # -----------------------------------------
 
                 llm = get_llm()
 
 
-                # -------------------------------------
-                # 5. Prompt
-                # -------------------------------------
+                # -----------------------------------------
+                # Prompt
+                # -----------------------------------------
 
-                prompt = ChatPromptTemplate.from_template(
-                    """
-You are a helpful PDF question-answering assistant.
+                prompt = f"""
+You are a PDF question answering assistant.
 
-Your job is to answer the user's question using
-ONLY the information provided in the context.
+Answer the question using ONLY the information
+provided in the context.
 
-Rules:
+Do not use outside knowledge.
 
-1. Do not use outside knowledge.
-2. Do not make up information.
-3. If the answer is not present in the context,
-   say exactly:
+If the answer is not available in the context,
+say:
 
 "I couldn't find that information in the PDF."
-
-4. Keep the answer clear and concise.
 
 Context:
 {context}
@@ -290,42 +345,31 @@ Question:
 
 Answer:
 """
+
+
+                # -----------------------------------------
+                # Generate answer
+                # -----------------------------------------
+
+                response = llm.invoke(
+                    prompt
                 )
 
 
-                # -------------------------------------
-                # 6. Create chain
-                # -------------------------------------
-
-                chain = prompt | llm
-
-
-                # -------------------------------------
-                # 7. Ask Mistral
-                # -------------------------------------
-
-                response = chain.invoke(
-                    {
-                        "context": context,
-                        "question": question
-                    }
-                )
-
-
-                # -------------------------------------
-                # 8. Display answer
-                # -------------------------------------
+                # -----------------------------------------
+                # Display answer
+                # -----------------------------------------
 
                 st.subheader("🤖 Answer")
 
                 st.write(
-                    response.content
+                    response
                 )
 
 
-                # -------------------------------------
-                # 9. Display sources
-                # -------------------------------------
+                # -----------------------------------------
+                # Sources
+                # -----------------------------------------
 
                 with st.expander(
                     "📄 View Sources"
@@ -365,40 +409,6 @@ Answer:
 
             except Exception as e:
 
-                error_message = str(e)
-
-
-                # -------------------------------------
-                # Rate limit error
-                # -------------------------------------
-
-                if (
-                    "429" in error_message
-                    or "rate_limit" in error_message.lower()
-                    or "rate limit" in error_message.lower()
-                ):
-
-                    st.error(
-                        """
-❌ Mistral API rate limit reached.
-
-Your PDF embeddings are running locally,
-so this error is coming from the Mistral
-chat request.
-
-Please wait for the API limit to reset or
-use an account/plan with available API capacity.
-"""
-                    )
-
-
-                # -------------------------------------
-                # Other error
-                # -------------------------------------
-
-                else:
-
-                    st.error(
-                        f"❌ Error while answering question: "
-                        f"{error_message}"
-                    )
+                st.error(
+                    f"❌ Error while answering question:\n\n{str(e)}"
+                )
